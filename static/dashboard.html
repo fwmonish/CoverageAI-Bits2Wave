@@ -1,0 +1,78 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>COVERAGE-AI</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+:root{--bg:#0f1318;--card:#181e26;--fg:#e6edf3;--mut:#8b98a5;--acc:#ff9f1c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+header{padding:10px 16px;display:flex;justify-content:space-between;border-bottom:1px solid #2a3340}
+main{display:grid;grid-template-columns:1fr 330px;gap:12px;padding:12px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border-radius:10px;padding:12px;margin-bottom:12px}
+#rssi{font-size:48px;font-weight:700;color:var(--acc)}.k{color:var(--mut)}
+table{width:100%}td:last-child{text-align:right}
+button,select{background:#232c37;color:var(--fg);border:1px solid #33404f;border-radius:6px;padding:6px 10px;margin:2px;cursor:pointer}
+input[type=range]{width:100%}
+</style></head><body>
+<header><b>COVERAGE-AI</b><span id="conn" class="k">connecting…</span></header>
+<main>
+<div class="card" style="margin:0"><div id="map" style="height:640px"></div></div>
+<div>
+ <div class="card"><small class="k">Live RSSI (dBm)</small><div id="rssi">--</div><div id="spark" style="height:110px"></div></div>
+ <div class="card"><table id="stats"></table></div>
+ <div class="card">
+  <select id="view"><option value="mu">RSSI map</option><option value="sd">Uncertainty</option></select>
+  <button onclick="send({cmd:'retrain'})">Retrain</button>
+  <button onclick="if(confirm('Clear all samples?')){send({cmd:'clear'})}">Clear</button>
+  <a href="/export"><button>Export CSV</button></a>
+  <div style="margin-top:8px">Weak threshold: <b id="wv">-75</b> dBm</div>
+  <input id="weak" type="range" min="-95" max="-50" value="-75">
+  <small class="k">Red = strong signal, yellow = weak. Drive the bot with W A S D (hold).</small>
+ </div>
+</div></main>
+<script>
+const $=id=>document.getElementById(id);
+const CS='YlOrRd';
+let M=null,L={},hist=[],trail=[],weak=-75,size=[1.5,1.5];
+const ws=new WebSocket(`ws://${location.host}/ws`);
+const send=o=>ws.readyState===1&&ws.send(JSON.stringify(o));
+ws.onopen=()=>{$('conn').textContent='connected'};ws.onclose=()=>{$('conn').textContent='disconnected'};
+ws.onmessage=e=>{const m=JSON.parse(e.data);
+ if(m.type==='live'){L=m;size=m.size;
+  if(m.rssi!=null){$('rssi').textContent=m.rssi;hist.push(m.rssi);if(hist.length>150)hist.shift();}
+  if(m.pos){const t=trail[trail.length-1];if(!t||t[0]!==m.pos[0])trail.push(m.pos);if(trail.length>500)trail.shift();}
+  stats();spark();draw();}
+ else if(m.type==='map'){M=m;draw();stats();}
+ else if(m.type==='clear'){M=null;trail=[];hist=[];draw();stats();}};
+function spark(){Plotly.react('spark',[{y:hist,type:'scatter',line:{color:'#ff9f1c',width:2}}],
+ {paper_bgcolor:'#181e26',plot_bgcolor:'#181e26',margin:{l:30,r:5,t:5,b:15},font:{color:'#8b98a5',size:10},yaxis:{range:[-100,-20]}},{displayModeBar:false});}
+function stats(){
+ const weakPct=M?(100*M.mu.flat().filter(v=>v<weak).length/M.mu.flat().length).toFixed(1)+' %':'--';
+ const rows=[['Samples',L.n??0],['ESP32',L.esp??'--'],['BSSID / ch',(L.bssid||'--')+' / '+(L.ch||'--')],
+  ['Bot position',L.pos?L.pos.map(v=>v.toFixed(2)).join(', ')+' m':'not seen'],
+  ['AP estimate',M?M.ap.join(', ')+' m':'--'],['P0 / n',M?M.p0+' dBm / '+M.n:'--'],['Fit RMSE',M?M.rmse+' dB':'--'],
+  ['Weak area',weakPct],['Repeater at',M&&M.rep?`${M.rep.x}, ${M.rep.y} m`:'--'],
+  ['Weak after repeater',M&&M.rep?`${M.rep.before}% → ${M.rep.after}%`:'--']];
+ $('stats').innerHTML=rows.map(r=>`<tr><td class="k">${r[0]}</td><td>${r[1]}</td></tr>`).join('');}
+function draw(){
+ const v=$('view').value,t=[];
+ const lay={paper_bgcolor:'#181e26',plot_bgcolor:'#181e26',font:{color:'#e6edf3'},margin:{l:45,r:10,t:10,b:35},showlegend:false,
+  xaxis:{title:'x (m)',range:[0,size[0]]},yaxis:{title:'y (m)',range:[size[1],0],scaleanchor:'x'}};
+ if(M){
+  t.push({type:'heatmap',x:M.gx,y:M.gy,z:v==='mu'?M.mu:M.sd,colorscale:CS,zsmooth:'best',zmin:v==='mu'?-90:0,zmax:v==='mu'?-30:8,colorbar:{title:v==='mu'?'dBm':'σ dB'}});
+  t.push({type:'contour',x:M.gx,y:M.gy,z:M.mu,showscale:false,hoverinfo:'skip',contours:{start:weak,end:weak,size:1,coloring:'none'},line:{color:'#00e5ff',width:2,dash:'dot'}});
+  t.push({type:'scatter',mode:'markers',x:M.pts.map(p=>p[0]),y:M.pts.map(p=>p[1]),hoverinfo:'skip',
+   marker:{size:4,color:M.pts.map(p=>p[2]),colorscale:CS,cmin:-90,cmax:-30,line:{color:'#222',width:.5}}});
+  t.push({type:'scatter',mode:'markers+text',x:[M.ap[0]],y:[M.ap[1]],text:['AP'],textposition:'top center',marker:{symbol:'star',size:18,color:'#fff',line:{color:'#000',width:1}}});
+  if(M.rep)t.push({type:'scatter',mode:'markers+text',x:[M.rep.x],y:[M.rep.y],text:['Repeater'],textposition:'top center',marker:{symbol:'diamond',size:14,color:'#3f3',line:{color:'#000',width:1}}});}
+ if(trail.length){t.push({type:'scatter',mode:'lines',x:trail.map(p=>p[0]),y:trail.map(p=>p[1]),line:{color:'#ddd',width:1}});
+  const p=trail[trail.length-1];t.push({type:'scatter',mode:'markers',x:[p[0]],y:[p[1]],marker:{size:12,color:'#08f',line:{color:'#fff',width:2}}});}
+ Plotly.react('map',t,lay);}
+$('view').onchange=draw;
+$('weak').oninput=e=>{weak=+e.target.value;$('wv').textContent=weak;draw();stats();};
+$('weak').onchange=e=>send({cmd:'weak',v:+e.target.value});
+const K=new Set(),cl=v=>Math.max(-255,Math.min(255,Math.round(v)));
+onkeydown=e=>K.add(e.key.toLowerCase());onkeyup=e=>K.delete(e.key.toLowerCase());
+setInterval(()=>{const f=(K.has('w')?1:0)-(K.has('s')?1:0),t=(K.has('d')?1:0)-(K.has('a')?1:0);
+ if(f||t)send({cmd:'drive',l:cl(f*180+t*140),r:cl(f*180-t*140)});},100);
+draw();stats();
+</script></body></html>
